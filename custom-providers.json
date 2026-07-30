@@ -1,55 +1,70 @@
 {
-  "providers": [
-    {
-      "name": "my-local-llm",
-      "label": "My Local LLM",
-      "baseUrl": "http://localhost:11434/v1",
-      "apiKey": "no-key-needed",
-      "models": [
+    "providers": [
         {
-          "id": "llama3.1:8b",
-          "name": "Llama 3.1 8B",
-          "reasoning": false,
-          "input": ["text"],
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-          "contextWindow": 128000,
-          "maxTokens": 32000
-        }
-      ]
-    },
-    {
-      "name": "my-vllm-server",
-      "label": "My vLLM Server",
-      "baseUrl": "http://localhost:8000/v1",
-      "apiKey": "no-key-needed",
-      "fetchModels": true,
-      "headers": {
-        "X-Custom-Header": "$MY_CUSTOM_HEADER"
-      },
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
-      }
-    },
-    {
-      "name": "my-corporate-proxy",
-      "label": "Corporate AI Proxy",
-      "baseUrl": "https://ai-gateway.corp.com/v1",
-      "apiKey": "$CORP_PROXY_KEY",
-      "models": [
+            "name": "my-local-llm",
+            "label": "My Local LLM",
+            "baseUrl": "http://localhost:11434/v1",
+            "apiKey": "no-key-needed",
+            "models": [
+                {
+                    "id": "llama3.1:8b",
+                    "name": "Llama 3.1 8B",
+                    "reasoning": false,
+                    "input": [
+                        "text"
+                    ],
+                    "cost": {
+                        "input": 0,
+                        "output": 0,
+                        "cacheRead": 0,
+                        "cacheWrite": 0
+                    },
+                    "contextWindow": 128000,
+                    "maxTokens": 32000
+                }
+            ]
+        },
         {
-          "id": "gpt-4o",
-          "name": "GPT-4o (via Corp Proxy)",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "cost": { "input": 2.5, "output": 10, "cacheRead": 0.5, "cacheWrite": 1.25 },
-          "contextWindow": 128000,
-          "maxTokens": 16384
+            "name": "my-vllm-server",
+            "label": "My vLLM Server",
+            "baseUrl": "http://localhost:8000/v1",
+            "apiKey": "no-key-needed",
+            "fetchModels": true,
+            "headers": {
+                "X-Custom-Header": "$MY_CUSTOM_HEADER"
+            },
+            "compat": {
+                "supportsDeveloperRole": false,
+                "supportsReasoningEffort": false
+            }
+        },
+        {
+            "name": "my-corporate-proxy",
+            "label": "Corporate AI Proxy",
+            "baseUrl": "https://ai-gateway.corp.com/v1",
+            "apiKey": "$CORP_PROXY_KEY",
+            "models": [
+                {
+                    "id": "gpt-4o",
+                    "name": "GPT-4o (via Corp Proxy)",
+                    "reasoning": false,
+                    "input": [
+                        "text",
+                        "image"
+                    ],
+                    "cost": {
+                        "input": 2.5,
+                        "output": 10,
+                        "cacheRead": 0.5,
+                        "cacheWrite": 1.25
+                    },
+                    "contextWindow": 128000,
+                    "maxTokens": 16384
+                }
+            ],
+            "headers": {
+                "X-Corp-Auth": "$CORP_AUTH_TOKEN"
+            }
         }
-      ],
-      "headers": {
-        "X-Corp-Auth": "$CORP_AUTH_TOKEN"
-      }
-    }
-  ]
+    ]
 }
