@@ -21,6 +21,7 @@
     "homepage": "https://github.com/Esuyo/pi-esuyo-custom-provider#readme",
     "files": [
         "src/",
+        "docs/",
         "custom-providers.json",
         "README.md",
         "LICENSE"
