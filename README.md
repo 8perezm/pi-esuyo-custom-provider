@@ -2,8 +2,6 @@
 
 A Pi.dev extension that lets you register custom OpenAI-compatible providers via a JSON config file.
 
----
-
 ## How it works
 
 This extension reads `~/.pi/agent/custom-providers.json` and registers each entry as an OpenAI-compatible provider in Pi.dev using `pi.registerProvider()`. You can define models statically, auto-discover them from the provider's `/v1/models` endpoint, or both.
