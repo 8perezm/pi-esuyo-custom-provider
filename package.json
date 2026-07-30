@@ -1,6 +1,6 @@
 {
     "name": "@esuyo/pi-esuyo-custom-provider",
-    "version": "1.0.6",
+    "version": "1.0.7",
     "description": "Register custom OpenAI-compatible providers in Pi.dev via JSON config",
     "keywords": [
         "pi-package",
