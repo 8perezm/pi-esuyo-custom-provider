@@ -1,0 +1,33 @@
+{
+    "name": "pi-esuyo-custom-provider",
+    "version": "1.0.0",
+    "description": "Register custom OpenAI-compatible providers in Pi.dev via JSON config",
+    "keywords": [
+        "pi-package",
+        "pi-extension",
+        "openai",
+        "provider",
+        "llm"
+    ],
+    "license": "MIT",
+    "author": "Esuyo",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Esuyo/pi-esuyo-custom-provider.git"
+    },
+    "bugs": {
+        "url": "https://github.com/Esuyo/pi-esuyo-custom-provider/issues"
+    },
+    "homepage": "https://github.com/Esuyo/pi-esuyo-custom-provider#readme",
+    "files": [
+        "src/",
+        "custom-providers.json",
+        "README.md",
+        "LICENSE"
+    ],
+    "pi": {
+        "extensions": [
+            "./src/index.ts"
+        ]
+    }
+}
