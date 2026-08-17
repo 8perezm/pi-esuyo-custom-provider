@@ -13,12 +13,12 @@
     "author": "Esuyo",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/Esuyo/pi-esuyo-custom-provider.git"
+        "url": "git+https://github.com/8perezm/pi-esuyo-custom-provider"
     },
     "bugs": {
-        "url": "https://github.com/Esuyo/pi-esuyo-custom-provider/issues"
+        "url": "https://github.com/8perezm/pi-esuyo-custom-provider/issues"
     },
-    "homepage": "https://github.com/Esuyo/pi-esuyo-custom-provider#readme",
+    "homepage": "https://github.com/8perezm/pi-esuyo-custom-provider#readme",
     "files": [
         "src/",
         "docs/",
