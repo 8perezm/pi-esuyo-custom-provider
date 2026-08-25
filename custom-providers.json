@@ -30,6 +30,8 @@
             "baseUrl": "http://localhost:8000/v1",
             "apiKey": "no-key-needed",
             "fetchModels": true,
+            "contextWindow": 128000,
+            "maxTokens": 32000,
             "headers": {
                 "X-Custom-Header": "$MY_CUSTOM_HEADER"
             },

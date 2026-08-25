@@ -40,6 +40,8 @@ Run `/reload` in Pi (or restart it), then open the model picker with `/model` �
 | `apiKey` | ✅ | API key. Supports env vars (`$MY_KEY` / `${MY_KEY}`) and shell commands (`!command`). |
 | `fetchModels` | — | Auto-discover models from `{baseUrl}/models`. Default: `false`. |
 | `models` | — | Static model definitions (merged with discovered models when `fetchModels: true`). |
+| `contextWindow` | — | Provider-level default context window (tokens). Applied to every model unless the model defines its own. |
+| `maxTokens` | — | Provider-level default max output tokens. Applied to every model unless the model defines its own. |
 | `headers` | — | Extra HTTP headers sent with every request. |
 | `compat` | — | Provider compatibility flags (see below). |
 
@@ -63,8 +65,8 @@ Same syntax as Pi's `models.json`:
 | `name` | `id` | Human-readable label. |
 | `reasoning` | `false` | Supports extended thinking. |
 | `input` | `["text"]` | Input types: `["text"]` or `["text", "image"]`. |
-| `contextWindow` | `128000` | Max context window in tokens. |
-| `maxTokens` | `4096` | Max output tokens. |
+| `contextWindow` | — | Max context window in tokens. Falls back to the provider-level `contextWindow`, otherwise Pi.dev decides. |
+| `maxTokens` | — | Max output tokens. Falls back to the provider-level `maxTokens`, otherwise Pi.dev decides. |
 | `cost` | all zeros | Per-million-token rates `{ input, output, cacheRead, cacheWrite }`. |
 
 ### Compatibility flags

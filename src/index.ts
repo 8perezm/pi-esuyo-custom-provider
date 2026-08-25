@@ -14,6 +14,8 @@
  *       "baseUrl": "http://localhost:11434/v1",
  *       "apiKey": "no-key-needed",
  *       "fetchModels": true,
+ *       "contextWindow": 128000,
+ *       "maxTokens": 32000,
  *       "models": [
  *         {
  *           "id": "llama3.1:8b",
@@ -89,6 +91,20 @@ interface CustomProviderEntry {
     models?: ProviderModelConfig[];
 
     /**
+     * Provider-level default context window (tokens), applied to every model
+     * of this provider that doesn't define its own `contextWindow`.
+     * Model-level values always win.
+     */
+    contextWindow?: number;
+
+    /**
+     * Provider-level default max output tokens, applied to every model
+     * of this provider that doesn't define its own `maxTokens`.
+     * Model-level values always win.
+     */
+    maxTokens?: number;
+
+    /**
      * Additional HTTP headers sent with every request to this provider.
      * Values support the same resolution syntax as apiKey.
      */
@@ -120,8 +136,7 @@ const FALLBACK_MODEL: ProviderModelConfig = {
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
-    maxTokens: 4096,
+    contextWindow: 256000,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -174,6 +189,8 @@ function resolveApiKey(raw: string): string {
 /**
  * Fetch available models from an OpenAI-compatible `/v1/models` endpoint.
  * Returns a minimal `ProviderModelConfig` for each entry.
+ * `contextWindow` / `maxTokens` are intentionally omitted — provider-level
+ * defaults are applied later via `applyProviderDefaults`.
  */
 async function fetchModelsFromEndpoint(
     baseUrl: string,
@@ -216,8 +233,6 @@ async function fetchModelsFromEndpoint(
             reasoning: false,
             input: ["text"] as ("text")[],
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 128000,
-            maxTokens: 4096,
         }));
     } catch (err) {
         console.warn(
@@ -245,6 +260,21 @@ function mergeModels(
     }
 
     return [...map.values()];
+}
+
+/**
+ * Apply provider-level `contextWindow` / `maxTokens` defaults to every model
+ * that doesn't define its own values. Model-level settings always win.
+ */
+function applyProviderDefaults(
+    models: ProviderModelConfig[],
+    entry: Pick<CustomProviderEntry, "contextWindow" | "maxTokens">,
+): ProviderModelConfig[] {
+    return models.map((m) => ({
+        ...m,
+        contextWindow: m.contextWindow ?? entry.contextWindow,
+        maxTokens: m.maxTokens ?? entry.maxTokens,
+    }));
 }
 
 // ── Extension Entry Point ──────────────────────────────────────────────────
@@ -303,8 +333,19 @@ async function registerSingleProvider(pi: ExtensionAPI, entry: CustomProviderEnt
         models = staticModels;
     } else {
         // Neither fetchModels nor static models: provide a fallback
-        models = [FALLBACK_MODEL];
+        // (provider-level contextWindow/maxTokens still take precedence here)
+        models = [
+            {
+                ...FALLBACK_MODEL,
+                contextWindow: entry.contextWindow ?? FALLBACK_MODEL.contextWindow,
+                maxTokens: entry.maxTokens,
+            },
+        ];
     }
+
+    // Provider-level contextWindow/maxTokens apply to every model that
+    // didn't define its own values — model-level settings always win.
+    models = applyProviderDefaults(models, entry);
 
     // ── Build provider config ────────────────────────────────────────────
 
