@@ -1,4 +1,5 @@
 {
+    "_comment": "Example config. $PI_SESSION_ID in headers is handled by this extension (stripped before pi.registerProvider, substituted per request) — Pi core never sees it.",
     "providers": [
         {
             "name": "my-local-llm",

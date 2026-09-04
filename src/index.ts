@@ -111,6 +111,15 @@ interface CustomProviderEntry {
      * The reserved `$PI_SESSION_ID` / `${PI_SESSION_ID}` placeholder is
      * substituted per request with the live Pi session id (see below).
      *
+     * IMPORTANT: headers whose values contain the session placeholder are
+     * STRIPPED before `pi.registerProvider` is called and NEVER passed to
+     * Pi core — Pi resolves every provider header as an env-var template
+     * (`resolveHeadersOrThrow`) and would throw
+     * `Failed to resolve provider "<id>" header "<key>" from environment
+     * variable: PI_SESSION_ID` (surfaced as `API key auth failed`).
+     * The extension holds these templates back and injects the live id
+     * itself in the `before_provider_headers` hook.
+     *
      * Note: `x-opencode-session` / `x-opencode-client` are NOT sent from
      * static `headers` per-request — use `sendSessionHeaders` below if the
      * upstream gateway needs the current Pi conversation id.
@@ -161,6 +170,10 @@ const FALLBACK_MODEL: ProviderModelConfig = {
  * values (e.g. `"headers": { "x-opencode-session": "$PI_SESSION_ID" }`).
  * Both `$PI_SESSION_ID` and `${PI_SESSION_ID}` forms are recognized.
  * The distinctive name avoids collisions with real environment variables.
+ *
+ * These templates are held back at registration time and never reach Pi
+ * core (which would throw trying to resolve them as env vars); the
+ * `before_provider_headers` hook substitutes the live id per request.
  */
 const SESSION_ID_VAR_BARE = "$PI_SESSION_ID";
 const SESSION_ID_VAR_BRACED = "${PI_SESSION_ID}";
@@ -343,25 +356,19 @@ export default async function (pi: ExtensionAPI) {
     // per-request hook below only touches flagged providers. Providers whose
     // raw header templates contain `$PI_SESSION_ID` are tracked separately —
     // the variable IS the opt-in, independent of the flag.
+    // `registerSingleProvider` partitions session-variable headers out and
+    // returns the held-back templates, so Pi core never sees the placeholder.
     const sessionHeaderProviders = new Set<string>();
     const sessionVarTemplates = new Map<string, Array<{ key: string; template: string }>>();
     for (const entry of config.providers) {
         try {
-            await registerSingleProvider(pi, entry);
+            const heldBack = await registerSingleProvider(pi, entry);
             if (typeof entry.name === "string" && entry.name) {
                 if (entry.sendSessionHeaders === true) {
                     sessionHeaderProviders.add(entry.name);
                 }
-                const rawHeaders = (entry as CustomProviderEntry).headers;
-                if (rawHeaders && typeof rawHeaders === "object") {
-                    for (const [key, value] of Object.entries(rawHeaders)) {
-                        if (isAuthHeader(key)) continue;
-                        if (containsSessionVar(value)) {
-                            const list = sessionVarTemplates.get(entry.name) ?? [];
-                            list.push({ key, template: value as string });
-                            sessionVarTemplates.set(entry.name, list);
-                        }
-                    }
+                if (heldBack.length > 0) {
+                    sessionVarTemplates.set(entry.name, heldBack);
                 }
             }
         } catch (err) {
@@ -409,11 +416,11 @@ export default async function (pi: ExtensionAPI) {
                             // leaking the literal placeholder.
                             mutable[key] = null;
                         } else {
-                            // Overwrite unconditionally with the live value:
-                            // Pi core resolves `$VAR` in header values from
-                            // ENVIRONMENT variables, so it would have expanded
-                            // `$PI_SESSION_ID` from env (or to ""); the live
-                            // session id must win over env expansion.
+                            // Overwrite unconditionally with the live value.
+                            // Pi core never saw the placeholder: it was
+                            // stripped before registration (Pi would have
+                            // thrown resolving `$PI_SESSION_ID` as an env
+                            // var), so the hook is the sole source of truth.
                             mutable[key] = substituteSessionId(template, sid);
                         }
                     }
@@ -433,7 +440,10 @@ export default async function (pi: ExtensionAPI) {
     }
 }
 
-async function registerSingleProvider(pi: ExtensionAPI, entry: CustomProviderEntry) {
+async function registerSingleProvider(
+    pi: ExtensionAPI,
+    entry: CustomProviderEntry,
+): Promise<Array<{ key: string; template: string }>> {
     const {
         name,
         label,
@@ -447,7 +457,7 @@ async function registerSingleProvider(pi: ExtensionAPI, entry: CustomProviderEnt
 
     if (!name || !baseUrl) {
         console.warn(`[custom-providers] Skipping entry with missing name or baseUrl`);
-        return;
+        return [];
     }
 
     // ── Resolve models ───────────────────────────────────────────────────
@@ -485,8 +495,31 @@ async function registerSingleProvider(pi: ExtensionAPI, entry: CustomProviderEnt
         models,
     };
 
+    const heldBackTemplates: Array<{ key: string; template: string }> = [];
+
     if (headers && Object.keys(headers).length > 0) {
-        providerConfig.headers = headers;
+        // PARTITION headers: session-variable templates are HELD BACK and
+        // never passed to Pi core. Pi resolves EVERY provider header as an
+        // env-var template at registration/request time and throws
+        // `Failed to resolve provider "<id>" header "<key>" from environment
+        // variable: PI_SESSION_ID` for the unresolvable `$PI_SESSION_ID`
+        // placeholder (wrapped as `API key auth failed`). Only static
+        // headers go to Pi; held-back templates are substituted per request
+        // by the `before_provider_headers` hook. Auth headers are never
+        // held back or touched by session logic.
+        const staticHeaders: Record<string, string> = {};
+        for (const [key, value] of Object.entries(headers)) {
+            if (!isAuthHeader(key) && containsSessionVar(value)) {
+                heldBackTemplates.push({ key, template: value as string });
+                continue;
+            }
+            staticHeaders[key] = value;
+        }
+        if (Object.keys(staticHeaders).length > 0) {
+            providerConfig.headers = staticHeaders;
+        }
+        // When nothing static remains, `headers` is omitted entirely —
+        // Pi's `resolveHeaders` handles undefined fine.
     }
 
     if (compat && Object.keys(compat).length > 0) {
@@ -503,4 +536,6 @@ async function registerSingleProvider(pi: ExtensionAPI, entry: CustomProviderEnt
     } catch (err) {
         console.error(`[custom-providers] Failed to register "${name}":`, err);
     }
+
+    return heldBackTemplates;
 }

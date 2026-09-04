@@ -95,7 +95,7 @@ are never touched. Providers without the flag are unchanged.
 
 Alternatively, map the session id to any header with `$PI_SESSION_ID` (or
 `${PI_SESSION_ID}`) in `headers` — presence of the variable is its own opt-in,
-independent of the flag:
+independent of the flag. The extension (not Pi) owns this placeholder:
 
 ```json
 {
@@ -110,8 +110,15 @@ independent of the flag:
 }
 ```
 
-The value is substituted per request with the live session id (overwriting Pi
-core's env expansion of the same placeholder). With no live session the header
+Headers containing `$PI_SESSION_ID` are stripped before `pi.registerProvider`
+is called and never reach Pi core — Pi resolves every provider header as an
+env-var template and would otherwise throw
+`Failed to resolve provider "<id>" header "<key>" from environment variable:
+PI_SESSION_ID` (surfaced as `API key auth failed`). The extension holds these
+templates back and substitutes the live session id per request in the
+`before_provider_headers` hook (overwriting unconditionally).
+
+The value is substituted per request with the live session id. With no live session the header
 is deleted (`null`), never sent literally. `Authorization` is never touched.
 
 ### Compatibility flags
