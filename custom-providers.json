@@ -65,8 +65,10 @@
                 }
             ],
             "headers": {
-                "X-Corp-Auth": "$CORP_AUTH_TOKEN"
-            }
+                "X-Corp-Auth": "$CORP_AUTH_TOKEN",
+                "x-opencode-session": "$PI_SESSION_ID"
+            },
+            "sendSessionHeaders": true
         }
     ]
 }

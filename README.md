@@ -43,6 +43,7 @@ Run `/reload` in Pi (or restart it), then open the model picker with `/model` �
 | `contextWindow` | — | Provider-level default context window (tokens). Applied to every model unless the model defines its own. |
 | `maxTokens` | — | Provider-level default max output tokens. Applied to every model unless the model defines its own. |
 | `headers` | — | Extra HTTP headers sent with every request. |
+| `sendSessionHeaders` | — | Send per-conversation `x-opencode-session` / `x-opencode-client` headers (see below). Default: `false`. |
 | `compat` | — | Provider compatibility flags (see below). |
 
 ### API key resolution
@@ -68,6 +69,50 @@ Same syntax as Pi's `models.json`:
 | `contextWindow` | — | Max context window in tokens. Falls back to the provider-level `contextWindow`, otherwise Pi.dev decides. |
 | `maxTokens` | — | Max output tokens. Falls back to the provider-level `maxTokens`, otherwise Pi.dev decides. |
 | `cost` | all zeros | Per-million-token rates `{ input, output, cacheRead, cacheWrite }`. |
+
+### Session headers
+
+Pi only sends `x-opencode-session` for its built-in opencode providers. If your
+gateway needs the current conversation id, opt in per provider:
+
+```json
+{
+  "providers": [
+    {
+      "name": "gateway",
+      "baseUrl": "https://gateway.corp.com/v1",
+      "apiKey": "$GATEWAY_API_KEY",
+      "sendSessionHeaders": true
+    }
+  ]
+}
+```
+
+With `sendSessionHeaders: true`, every request for that provider gets
+`x-opencode-session: <live session id>` (read fresh per request, so it survives
+new/resume/fork) and `x-opencode-client: pi` when not already set. Auth headers
+are never touched. Providers without the flag are unchanged.
+
+Alternatively, map the session id to any header with `$PI_SESSION_ID` (or
+`${PI_SESSION_ID}`) in `headers` — presence of the variable is its own opt-in,
+independent of the flag:
+
+```json
+{
+  "providers": [
+    {
+      "name": "gateway",
+      "baseUrl": "https://gateway.corp.com/v1",
+      "apiKey": "$GATEWAY_API_KEY",
+      "headers": { "x-opencode-session": "$PI_SESSION_ID" }
+    }
+  ]
+}
+```
+
+The value is substituted per request with the live session id (overwriting Pi
+core's env expansion of the same placeholder). With no live session the header
+is deleted (`null`), never sent literally. `Authorization` is never touched.
 
 ### Compatibility flags
 

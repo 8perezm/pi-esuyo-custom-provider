@@ -107,8 +107,25 @@ interface CustomProviderEntry {
     /**
      * Additional HTTP headers sent with every request to this provider.
      * Values support the same resolution syntax as apiKey.
+     *
+     * The reserved `$PI_SESSION_ID` / `${PI_SESSION_ID}` placeholder is
+     * substituted per request with the live Pi session id (see below).
+     *
+     * Note: `x-opencode-session` / `x-opencode-client` are NOT sent from
+     * static `headers` per-request — use `sendSessionHeaders` below if the
+     * upstream gateway needs the current Pi conversation id.
+     * Auth headers (e.g. `Authorization`) are never touched by that flag.
      */
     headers?: Record<string, string>;
+
+    /**
+     * Opt-in per-conversation session attribution for this provider.
+     * When true, a `before_provider_headers` hook injects the live session id
+     * (`x-opencode-session`, plus `x-opencode-client: pi` when unset) on every
+     * request made with this provider. The id is read fresh per request, so it
+     * survives new/resume/fork. Default: false (no behavior change).
+     */
+    sendSessionHeaders?: boolean;
 
     /**
      * Provider-level compatibility overrides.
@@ -138,6 +155,35 @@ const FALLBACK_MODEL: ProviderModelConfig = {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 256000,
 };
+
+/**
+ * Reserved session variable, usable in any provider entry's `headers`
+ * values (e.g. `"headers": { "x-opencode-session": "$PI_SESSION_ID" }`).
+ * Both `$PI_SESSION_ID` and `${PI_SESSION_ID}` forms are recognized.
+ * The distinctive name avoids collisions with real environment variables.
+ */
+const SESSION_ID_VAR_BARE = "$PI_SESSION_ID";
+const SESSION_ID_VAR_BRACED = "${PI_SESSION_ID}";
+
+/** True when a raw header template opts into per-request session substitution. */
+function containsSessionVar(template: unknown): boolean {
+    return (
+        typeof template === "string" &&
+        (template.includes(SESSION_ID_VAR_BRACED) || template.includes(SESSION_ID_VAR_BARE))
+    );
+}
+
+/** Substitute every `$PI_SESSION_ID` / `${PI_SESSION_ID}` occurrence with the live id. */
+function substituteSessionId(template: string, sid: string): string {
+    return template.split(SESSION_ID_VAR_BRACED).join(sid).split(SESSION_ID_VAR_BARE).join(sid);
+}
+
+/** Auth headers are never written by session logic, even with an explicit placeholder. */
+function isAuthHeader(key: unknown): boolean {
+    if (typeof key !== "string") return true;
+    const lower = key.toLowerCase();
+    return lower === "authorization" || lower === "proxy-authorization";
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -293,15 +339,97 @@ export default async function (pi: ExtensionAPI) {
 
     // Register each provider, catching individual failures so one bad entry
     // doesn't prevent the rest from loading.
+    // Providers with `sendSessionHeaders: true` are tracked so the
+    // per-request hook below only touches flagged providers. Providers whose
+    // raw header templates contain `$PI_SESSION_ID` are tracked separately —
+    // the variable IS the opt-in, independent of the flag.
+    const sessionHeaderProviders = new Set<string>();
+    const sessionVarTemplates = new Map<string, Array<{ key: string; template: string }>>();
     for (const entry of config.providers) {
         try {
             await registerSingleProvider(pi, entry);
+            if (typeof entry.name === "string" && entry.name) {
+                if (entry.sendSessionHeaders === true) {
+                    sessionHeaderProviders.add(entry.name);
+                }
+                const rawHeaders = (entry as CustomProviderEntry).headers;
+                if (rawHeaders && typeof rawHeaders === "object") {
+                    for (const [key, value] of Object.entries(rawHeaders)) {
+                        if (isAuthHeader(key)) continue;
+                        if (containsSessionVar(value)) {
+                            const list = sessionVarTemplates.get(entry.name) ?? [];
+                            list.push({ key, template: value as string });
+                            sessionVarTemplates.set(entry.name, list);
+                        }
+                    }
+                }
+            }
         } catch (err) {
             console.error(
                 `[custom-providers] Failed to register provider "${entry.name}":`,
                 err instanceof Error ? err.message : err,
             );
         }
+    }
+
+    // Per-conversation session attribution: flag auto-injection plus
+    // `$PI_SESSION_ID` template substitution. Pi core only sends session
+    // headers for built-in opencode providers; this hook closes the gap.
+    // Runs after core attribution on every request; mutates event.headers
+    // in place (return value is ignored by Pi).
+    if (sessionHeaderProviders.size > 0 || sessionVarTemplates.size > 0) {
+        pi.on("before_provider_headers", (event, ctx) => {
+            try {
+                const providerId = ctx?.model?.provider;
+                if (typeof providerId !== "string" || providerId.length === 0) {
+                    return;
+                }
+                const varEntries = sessionVarTemplates.get(providerId);
+                const wantsFlag = sessionHeaderProviders.has(providerId);
+                if (!varEntries && !wantsFlag) {
+                    return;
+                }
+                const headers = event?.headers;
+                if (!headers || typeof headers !== "object") {
+                    return;
+                }
+                // Read fresh on every call — never cached — so new/resume/fork
+                // sessions are always attributed correctly.
+                const rawSid = ctx?.sessionManager?.getSessionId?.();
+                const sid =
+                    typeof rawSid === "string" && rawSid.length > 0 ? rawSid : null;
+                const mutable = headers as Record<string, unknown>;
+                // 1) `$PI_SESSION_ID` substitution — opt-in independent of the flag.
+                if (varEntries) {
+                    for (const { key, template } of varEntries) {
+                        if (typeof key !== "string" || key.length === 0) continue;
+                        if (isAuthHeader(key)) continue;
+                        if (sid === null) {
+                            // No session: delete the header rather than
+                            // leaking the literal placeholder.
+                            mutable[key] = null;
+                        } else {
+                            // Overwrite unconditionally with the live value:
+                            // Pi core resolves `$VAR` in header values from
+                            // ENVIRONMENT variables, so it would have expanded
+                            // `$PI_SESSION_ID` from env (or to ""); the live
+                            // session id must win over env expansion.
+                            mutable[key] = substituteSessionId(template, sid);
+                        }
+                    }
+                }
+                // 2) Flag auto-injection — unchanged behavior.
+                if (wantsFlag) {
+                    if (sid === null) {
+                        return;
+                    }
+                    mutable["x-opencode-session"] = sid;
+                    mutable["x-opencode-client"] ??= "pi";
+                }
+            } catch {
+                // A hook failure must never break a request.
+            }
+        });
     }
 }
 
