@@ -11,6 +11,12 @@
     ],
     "license": "MIT",
     "author": "Esuyo",
+    "scripts": {
+        "test": "node --test test/"
+    },
+    "dependencies": {
+        "@opencode-ai/models": "^0.0.116"
+    },
     "repository": {
         "type": "git",
         "url": "git+https://github.com/8perezm/pi-esuyo-custom-provider"
@@ -30,5 +36,8 @@
         "extensions": [
             "./src/index.ts"
         ]
+    },
+    "devDependencies": {
+        "jiti": "^2.7.0"
     }
 }

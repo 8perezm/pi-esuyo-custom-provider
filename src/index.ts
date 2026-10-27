@@ -45,12 +45,32 @@ import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-codin
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import {
+    applyModelsDevToDiscoveredPiModel,
+    applyModelsDevToStaticPiModel,
+    defaultModelsDevOptions,
+    findModelsDevMatch,
+    loadModelsDevCatalog,
+    resolveModelsDevForProvider,
+    shouldEnrichModelsDevMatch,
+} from "./models-dev.js";
+import type {
+    ModelsDevCatalogResult,
+    ModelsDevGlobalOptions,
+    ModelsDevProviderSetting,
+} from "./models-dev.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 interface ConfigFile {
     /** Ordered list of custom provider registrations. */
     providers?: CustomProviderEntry[];
+    /**
+     * models.dev catalog enrichment defaults (thinking/reasoning levels,
+     * input modalities, context limits). Enabled by default; degrades
+     * gracefully (bundled snapshot, then gateway-only) when unreachable.
+     */
+    modelsDev?: ModelsDevGlobalOptions;
 }
 
 interface CustomProviderEntry {
@@ -78,7 +98,8 @@ interface CustomProviderEntry {
     /**
      * If true, fetches available models from `{baseUrl}/models`
      * and merges them with any statically defined `models`.
-     * Default: false.
+     * Default: true when no static `models` are given, false otherwise.
+     * (A bare `name` + `baseUrl` + `apiKey` entry auto-discovers.)
      */
     fetchModels?: boolean;
 
@@ -132,9 +153,19 @@ interface CustomProviderEntry {
      * When true, a `before_provider_headers` hook injects the live session id
      * (`x-opencode-session`, plus `x-opencode-client: pi` when unset) on every
      * request made with this provider. The id is read fresh per request, so it
-     * survives new/resume/fork. Default: false (no behavior change).
+     * survives new/resume/fork. Default: true (opencode-style gateways
+     * require `x-opencode-session`; harmless for plain OpenAI servers).
+     * Set to `false` to opt out.
      */
     sendSessionHeaders?: boolean;
+
+    /**
+     * models.dev enrichment for this provider: `false` disables it,
+     * `true` inherits the global `modelsDev` settings, an object can toggle
+     * it or pin catalog match ranking to one models.dev provider namespace
+     * (e.g. `{ "provider": "openai" }`).
+     */
+    modelsDev?: ModelsDevProviderSetting;
 
     /**
      * Provider-level compatibility overrides.
@@ -155,6 +186,17 @@ interface CustomProviderEntry {
 
 const DEFAULT_CONFIG_PATH = resolve(homedir(), ".pi", "agent", "custom-providers.json");
 
+/**
+ * Hard fallback limits for models that neither models.dev nor the provider
+ * config supplies (e.g. an unknown gateway id with no `contextWindow` set).
+ * Matches Pi's own `models.json` defaults (128k context / 16k max output)
+ * so `pi --list-models` never crashes on `undefined` token counts.
+ * Provider-level `contextWindow`/`maxTokens` override these; model-level
+ * values (catalog, gateway, or static) override everything.
+ */
+const SAFE_FALLBACK_CONTEXT_WINDOW = 128000;
+const SAFE_FALLBACK_MAX_TOKENS = 16384;
+
 /** Fallback model used when no models are defined and fetchModels is off. */
 const FALLBACK_MODEL: ProviderModelConfig = {
     id: "default",
@@ -162,7 +204,8 @@ const FALLBACK_MODEL: ProviderModelConfig = {
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 256000,
+    contextWindow: SAFE_FALLBACK_CONTEXT_WINDOW,
+    maxTokens: SAFE_FALLBACK_MAX_TOKENS,
 };
 
 /**
@@ -246,15 +289,25 @@ function resolveApiKey(raw: string): string {
 }
 
 /**
+ * A model entry as advertised by the gateway's `/v1/models` endpoint.
+ * Gateways usually return bare IDs; richer (OpenRouter-style) payloads may
+ * carry a display name, token limits, or vision support — all preserved here
+ * so live endpoint data wins over catalog data on conflict.
+ */
+interface GatewayDiscoveredModel {
+    id: string;
+    raw: Record<string, any>;
+}
+
+/**
  * Fetch available models from an OpenAI-compatible `/v1/models` endpoint.
- * Returns a minimal `ProviderModelConfig` for each entry.
- * `contextWindow` / `maxTokens` are intentionally omitted — provider-level
- * defaults are applied later via `applyProviderDefaults`.
+ * Returns the raw gateway entries; the caller enriches them with models.dev
+ * metadata and shapes them into `ProviderModelConfig`.
  */
 async function fetchModelsFromEndpoint(
     baseUrl: string,
     apiKey?: string,
-): Promise<ProviderModelConfig[]> {
+): Promise<GatewayDiscoveredModel[]> {
     try {
         const url = baseUrl.replace(/\/+$/, "") + "/models";
 
@@ -273,12 +326,7 @@ async function fetchModelsFromEndpoint(
         }
 
         const payload = (await response.json()) as {
-            data?: Array<{
-                id: string;
-                object?: string;
-                created?: number;
-                owned_by?: string;
-            }>;
+            data?: Array<Record<string, any>>;
         };
 
         if (!payload.data || !Array.isArray(payload.data)) {
@@ -286,13 +334,16 @@ async function fetchModelsFromEndpoint(
             return [];
         }
 
-        return payload.data.map((m) => ({
-            id: m.id,
-            name: m.id,
-            reasoning: false,
-            input: ["text"] as ("text")[],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        }));
+        const out: GatewayDiscoveredModel[] = [];
+        const seen = new Set<string>();
+        for (const m of payload.data) {
+            if (!m || typeof m !== "object") continue;
+            const id = typeof m.id === "string" ? m.id.trim() : "";
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            out.push({ id, raw: m });
+        }
+        return out;
     } catch (err) {
         console.warn(
             `[custom-providers] Could not fetch models from ${baseUrl}:`,
@@ -300,6 +351,80 @@ async function fetchModelsFromEndpoint(
         );
         return [];
     }
+}
+
+/** Gateway-advertised limit/metadata fields (OpenRouter-style payloads). */
+function readGatewayRawMeta(raw: Record<string, any>): {
+    displayName?: string;
+    contextLength?: number;
+    maxOutput?: number;
+    vision?: boolean;
+} {
+    const meta: { displayName?: string; contextLength?: number; maxOutput?: number; vision?: boolean } = {};
+    const name = raw.display_name ?? raw.displayName ?? raw.name;
+    if (typeof name === "string" && name.trim() && name.trim() !== raw.id) meta.displayName = name.trim();
+    const ctx = raw.context_length ?? raw.contextLength ?? raw.max_context ?? raw.contextWindow;
+    if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) meta.contextLength = ctx;
+    const out = raw.max_output_tokens ?? raw.maxOutputTokens ?? raw.max_tokens ?? raw.maxTokens;
+    if (typeof out === "number" && Number.isFinite(out) && out > 0) meta.maxOutput = out;
+    const vision = raw.supports_vision ?? raw.supportsVision ?? raw.supports_image ?? raw.supportsImage;
+    if (typeof vision === "boolean") meta.vision = vision;
+    return meta;
+}
+
+/**
+ * Shape a discovered gateway model into a `ProviderModelConfig`, enriched
+ * with models.dev metadata (reasoning levels, input types, context limits).
+ * Precedence: models.dev < gateway raw (live endpoint wins on conflict).
+ */
+function buildDiscoveredModelConfig(
+    discovered: GatewayDiscoveredModel,
+    catalog: ModelsDevCatalogResult | null,
+    modelsDevOpts: Required<ModelsDevGlobalOptions>,
+    providerPin?: string,
+): ProviderModelConfig {
+    const { id, raw } = discovered;
+    const model: ProviderModelConfig = {
+        id,
+        name: id,
+        reasoning: false,
+        input: ["text"] as ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    };
+
+    const match = catalog ? findModelsDevMatch(id, catalog, providerPin) : null;
+    if (match && shouldEnrichModelsDevMatch(match.entry, modelsDevOpts)) {
+        applyModelsDevToDiscoveredPiModel(model as any, match.entry);
+    }
+
+    // Live gateway metadata wins over the catalog on conflict.
+    const meta = readGatewayRawMeta(raw);
+    if (meta.displayName) model.name = meta.displayName;
+    if (meta.contextLength !== undefined) model.contextWindow = meta.contextLength;
+    if (meta.maxOutput !== undefined) model.maxTokens = meta.maxOutput;
+    if (meta.vision !== undefined) {
+        model.input = meta.vision ? (["text", "image"] as ["text", "image"]) : (["text"] as ["text"]);
+    }
+
+    return model;
+}
+
+/**
+ * Enrich user-defined static models fill-only: any explicitly configured
+ * value wins, the catalog only supplies what the user left undefined.
+ */
+function enrichStaticModelConfig(
+    model: ProviderModelConfig,
+    catalog: ModelsDevCatalogResult | null,
+    modelsDevOpts: Required<ModelsDevGlobalOptions>,
+    providerPin?: string,
+): ProviderModelConfig {
+    // Image/classifier configs carry different field semantics — leave them alone.
+    if (!catalog || model.type === "image" || model.type === "classifier") return model;
+    const match = findModelsDevMatch(model.id, catalog, providerPin);
+    if (!match || !shouldEnrichModelsDevMatch(match.entry, modelsDevOpts)) return model;
+    applyModelsDevToStaticPiModel(model as any, match.entry);
+    return model;
 }
 
 /** Merge two model arrays: static models override discovered ones by id. */
@@ -322,17 +447,35 @@ function mergeModels(
 }
 
 /**
- * Apply provider-level `contextWindow` / `maxTokens` defaults to every model
- * that doesn't define its own values. Model-level settings always win.
+ * Apply provider-level `contextWindow` / `maxTokens` / `compat` defaults to
+ * every model. Model-level settings always win (compat merges per-field).
+ * Anything still undefined falls back to `SAFE_FALLBACK_*` (Pi's own
+ * `models.json` defaults) so models.dev misses never leave Pi with
+ * `undefined` limits (which crashes `pi --list-models`). The provider
+ * config's `contextWindow`/`maxTokens` are purely optional overrides —
+ * catalog/gateway values are used whenever present.
+ *
+ * NOTE: Pi's legacy `pi.registerProvider` (`applyExtension`) drops
+ * provider-level `compat` — only per-model `compat` reaches the stream
+ * (`getCompat(model)` reads `model.compat`). Propagating here ensures e.g.
+ * `supportsDeveloperRole: false` actually takes effect on discovered models.
  */
 function applyProviderDefaults(
     models: ProviderModelConfig[],
-    entry: Pick<CustomProviderEntry, "contextWindow" | "maxTokens">,
+    entry: Pick<CustomProviderEntry, "contextWindow" | "maxTokens" | "compat">,
 ): ProviderModelConfig[] {
     return models.map((m) => ({
         ...m,
-        contextWindow: m.contextWindow ?? entry.contextWindow,
-        maxTokens: m.maxTokens ?? entry.maxTokens,
+        contextWindow: m.contextWindow ?? entry.contextWindow ?? SAFE_FALLBACK_CONTEXT_WINDOW,
+        maxTokens: m.maxTokens ?? entry.maxTokens ?? SAFE_FALLBACK_MAX_TOKENS,
+        // `supportsDeveloperRole` defaults to false: `system` is accepted
+        // everywhere, `developer` breaks strict gateways. Explicit model-
+        // or provider-level settings always win.
+        compat: {
+            supportsDeveloperRole: false,
+            ...entry.compat,
+            ...(m.compat ?? {}),
+        },
     }));
 }
 
@@ -350,6 +493,27 @@ export default async function (pi: ExtensionAPI) {
         return;
     }
 
+    const modelsDevOpts = defaultModelsDevOptions(config.modelsDev);
+
+    // Load the models.dev catalog once when at least one provider opts in —
+    // shared by discovery + static enrichment for every provider below.
+    let modelsDevCatalog: ModelsDevCatalogResult | null = null;
+    const anyModelsDevEnabled =
+        modelsDevOpts.enabled &&
+        config.providers.some(
+            (e) => resolveModelsDevForProvider(modelsDevOpts, e.modelsDev).enabled,
+        );
+    if (anyModelsDevEnabled) {
+        modelsDevCatalog = await loadModelsDevCatalog(modelsDevOpts, (msg, extra) =>
+            extra !== undefined
+                ? console.log(`[custom-providers] ${msg}`, extra)
+                : console.log(`[custom-providers] ${msg}`),
+        );
+        if (!modelsDevCatalog) {
+            console.warn(`[custom-providers] models.dev enrichment unavailable, using gateway metadata only`);
+        }
+    }
+
     // Register each provider, catching individual failures so one bad entry
     // doesn't prevent the rest from loading.
     // Providers with `sendSessionHeaders: true` are tracked so the
@@ -362,9 +526,14 @@ export default async function (pi: ExtensionAPI) {
     const sessionVarTemplates = new Map<string, Array<{ key: string; template: string }>>();
     for (const entry of config.providers) {
         try {
-            const heldBack = await registerSingleProvider(pi, entry);
+            const heldBack = await registerSingleProvider(pi, entry, {
+                catalog: modelsDevCatalog,
+                modelsDevOpts,
+            });
             if (typeof entry.name === "string" && entry.name) {
-                if (entry.sendSessionHeaders === true) {
+                // Default true: opencode-style gateways require
+                // `x-opencode-session`; harmless otherwise. Opt out with false.
+                if (entry.sendSessionHeaders !== false) {
                     sessionHeaderProviders.add(entry.name);
                 }
                 if (heldBack.length > 0) {
@@ -443,22 +612,34 @@ export default async function (pi: ExtensionAPI) {
 async function registerSingleProvider(
     pi: ExtensionAPI,
     entry: CustomProviderEntry,
+    shared: {
+        catalog: ModelsDevCatalogResult | null;
+        modelsDevOpts: Required<ModelsDevGlobalOptions>;
+    },
 ): Promise<Array<{ key: string; template: string }>> {
     const {
         name,
         label,
         baseUrl,
         apiKey,
-        fetchModels: shouldFetch,
+        fetchModels: fetchModelsOpt,
         models: staticModels = [],
         headers,
         compat,
     } = entry;
+    // Default: auto-discover when no static models are given, otherwise
+    // stay static-only unless explicitly opted in. Lets a bare
+    // `name` + `baseUrl` + `apiKey` entry just work.
+    const shouldFetch = fetchModelsOpt ?? staticModels.length === 0;
 
     if (!name || !baseUrl) {
         console.warn(`[custom-providers] Skipping entry with missing name or baseUrl`);
         return [];
     }
+
+    const { catalog, modelsDevOpts } = shared;
+    const target = resolveModelsDevForProvider(modelsDevOpts, entry.modelsDev);
+    const activeCatalog = target.enabled ? catalog : null;
 
     // ── Resolve models ───────────────────────────────────────────────────
 
@@ -466,9 +647,25 @@ async function registerSingleProvider(
 
     if (shouldFetch) {
         const discovered = await fetchModelsFromEndpoint(baseUrl, apiKey);
-        models = mergeModels(staticModels, discovered);
+        const enriched = discovered.map((d) =>
+            buildDiscoveredModelConfig(d, activeCatalog, modelsDevOpts, target.provider),
+        );
+        const enrichedStatic = staticModels.map((m) =>
+            enrichStaticModelConfig(m, activeCatalog, modelsDevOpts, target.provider),
+        );
+        models = mergeModels(enrichedStatic, enriched);
+        if (activeCatalog && discovered.length > 0) {
+            const known = enriched.filter(
+                (m) => m.reasoning || (m.contextWindow ?? 0) > 0 || m.name !== m.id,
+            ).length;
+            console.log(
+                `[custom-providers] models.dev enrichment for "${name}": ${known}/${discovered.length} discovered models matched (${activeCatalog.source})`,
+            );
+        }
     } else if (staticModels.length > 0) {
-        models = staticModels;
+        models = staticModels.map((m) =>
+            enrichStaticModelConfig(m, activeCatalog, modelsDevOpts, target.provider),
+        );
     } else {
         // Neither fetchModels nor static models: provide a fallback
         // (provider-level contextWindow/maxTokens still take precedence here)

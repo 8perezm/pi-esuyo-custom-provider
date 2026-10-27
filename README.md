@@ -45,6 +45,59 @@ Run `/reload` in Pi (or restart it), then open the model picker with `/model` �
 | `headers` | — | Extra HTTP headers sent with every request. |
 | `sendSessionHeaders` | — | Send per-conversation `x-opencode-session` / `x-opencode-client` headers (see below). Default: `false`. |
 | `compat` | — | Provider compatibility flags (see below). |
+| `modelsDev` | — | models.dev enrichment for this provider: `false` disables it, `true`/omitted inherits the global `modelsDev` settings, `{ "provider": "openai" }` pins catalog match ranking. |
+
+### models.dev enrichment (thinking levels, input types, context limits)
+
+Gateways usually expose `/models` as bare IDs with no metadata. When enabled
+(the default), the extension looks each discovered — and each static-only —
+model up in the [models.dev](https://models.dev) catalog and fills in:
+
+| models.dev | Pi model field | Notes |
+|---|---|---|
+| `reasoning` | `reasoning` | Enables the thinking UI for capable models. |
+| `reasoning_options` effort values | `thinkingLevelMap` | Effort levels (e.g. `low`…`max`) map 1:1 onto Pi thinking levels; `none` enables `off`; unlisted levels are `null` (Pi clamps them). No effort info → field omitted (Pi defaults apply). |
+| `modalities.input` | `input` | Pi only supports `text`/`image`; other types (`pdf`, `video`, `audio`) are dropped. |
+| `limit.context` | `contextWindow` | Model-specific value beats the provider-level default. |
+| `limit.output` | `maxTokens` | |
+| `cost` (+ context tiers) | `cost` (+ `tiers` as `inputTokensAbove`) | Display/pricing only. |
+| `name` | `name` | Only when the gateway gave no display name. |
+
+Precedence: models.dev < live gateway metadata < provider-level
+`contextWindow`/`maxTokens` defaults < explicit static model fields. Static
+`models:` entries are enriched fill-only — anything you write wins over the
+catalog (including `reasoning: false`, which also suppresses the
+`thinkingLevelMap`). Entries with a non-chat catalog `type` (e.g.
+`embedding`) only enrich factual fields (name/limits/cost), never
+`reasoning`/`input`.
+
+`compat` is never auto-set from the catalog: Pi only sends `reasoning_effort`
+when the endpoint advertises `supportsReasoningEffort` (auto-detected or
+configured by you), so catalog `reasoning: true` alone cannot break endpoints
+that don't understand the parameter.
+
+The catalog is fetched once at startup (shared by all providers) and cached
+in memory. If the live fetch fails, the bundled `@opencode-ai/models`
+snapshot (at most ~24h old) is used; if that is unavailable too, the
+extension falls back to gateway-only metadata with a warning.
+
+Global defaults (top-level `modelsDev` object, all optional):
+
+```json
+{
+  "modelsDev": {
+    "enabled": true,
+    "baseUrl": "https://models.dev",
+    "timeoutMs": 8000,
+    "cacheTtlMs": 3600000,
+    "modelTypes": "all",
+    "excludeDeprecated": false,
+    "excludeTypes": ["embedding"],
+    "provider": "openai"
+  },
+  "providers": [...]
+}
+```
 
 ### API key resolution
 
@@ -64,7 +117,8 @@ Same syntax as Pi's `models.json`:
 |-------|---------|-------------|
 | `id` | — | Model identifier sent to the API (required). |
 | `name` | `id` | Human-readable label. |
-| `reasoning` | `false` | Supports extended thinking. |
+| `reasoning` | `false` | Supports extended thinking. Auto-filled from models.dev when enabled. |
+| `thinkingLevelMap` | — | Maps Pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) to provider values; `null` marks a level unsupported. Auto-filled from models.dev effort levels; explicit config wins. |
 | `input` | `["text"]` | Input types: `["text"]` or `["text", "image"]`. |
 | `contextWindow` | — | Max context window in tokens. Falls back to the provider-level `contextWindow`, otherwise Pi.dev decides. |
 | `maxTokens` | — | Max output tokens. Falls back to the provider-level `maxTokens`, otherwise Pi.dev decides. |
